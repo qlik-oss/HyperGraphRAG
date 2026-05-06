@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import partial
 from typing import Type, cast
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from .llm import (
     gpt_4o_mini_complete,
@@ -259,6 +260,26 @@ class HyperGraphRAG:
             "OracleGraphStorage": OracleGraphStorage,
             # "ArangoDBStorage": ArangoDBStorage
         }
+    
+    def recursive_chunking_langchain(
+        self,
+        content: str,
+        chunk_size: int = 1200,
+        chunk_overlap: int = 100,
+        model_name: str = "gpt-4o-mini"
+    ):
+        splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+            model_name=model_name,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""],  # hierarchical fallbacks
+            keep_separator=True,
+            add_start_index=True
+        )
+
+        # Split and filter out empty/whitespace-only chunks
+        chunks = splitter.split_text(content)
+        return [chunk for chunk in chunks if chunk.strip()]
 
     def insert(self, string_or_strings):
         loop = always_get_an_event_loop()
@@ -286,16 +307,17 @@ class HyperGraphRAG:
             for doc_key, doc in tqdm_async(
                 new_docs.items(), desc="Chunking documents", unit="doc"
             ):
+                logger.info(f"Start processing document {doc_key} with len {len(doc['content'])}")            
                 chunks = {
                     compute_mdhash_id(dp["content"], prefix="chunk-"): {
                         **dp,
                         "full_doc_id": doc_key,
                     }
-                    for dp in chunking_by_token_size(
+                    for dp in self.recursive_chunking_langchain(
                         doc["content"],
-                        overlap_token_size=self.chunk_overlap_token_size,
-                        max_token_size=self.chunk_token_size,
-                        tiktoken_model=self.tiktoken_model_name,
+                        chunk_size=self.chunk_token_size,
+                        chunk_overlap=self.chunk_overlap_token_size,
+                        model_name=self.tiktoken_model_name,
                     )
                 }
                 inserting_chunks.update(chunks)
