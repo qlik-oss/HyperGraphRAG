@@ -34,7 +34,7 @@ The original retrieval in HyperGraphRAG relies on semantic search + local one-ho
 ### PPR-retrieval Optimization
 
 <p align="center">
-<img src="./figs/F2.png" width="250"/>
+<img src="./figs/F2.png" width="300"/>
 </p>
 
 ## Environment Setup
@@ -90,7 +90,7 @@ If you use this work, please cite both the original HyperGraphRAG paper and our 
 @inproceedings{khrouf2026hypergraphrag-optim,
       title={Optimisation du RAG sur hypergraphes : vers une meilleure extraction de faits et récupération de chunks},
       author={Houda Khrouf and Pedro Fillastre and Sebastiao Correia},
-      booktitle={APIA 2026},
+      booktitle={Proceedings of the 12th Conference on Applications Pratiques de l’Intelligence Artificielle (APIA@PFIA 2026)},
       year={2026},
 }
 

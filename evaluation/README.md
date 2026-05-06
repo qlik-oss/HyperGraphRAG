@@ -7,7 +7,7 @@ cd evaluation
 ```
 Then, we need to set openai api key in ```openai_api_key.txt``` file. (We use [www.apiyi.com](https://www.apiyi.com/) for LLM server.)
 
-Last, we need download the contexts and datasets in data folder and put them in the ```contexts``` and ```datasets``` folders. 
+Last, we need to download the contexts and datasets in data folder and put them in the ```contexts``` and ```datasets``` folders. 
 
 ```
 HyperGraphRAG/
@@ -42,7 +42,7 @@ python script_hypergraphrag.py --data_source fiction
 # python script_standardrag.py --data_source hypertension
 # python script_naivegeneration.py --data_source hypertension
 ```
-With PPR optimization:  
+With PPR optimization enabled:  
 
 ```bash
 python script_hypergraphrag.py --data_source fiction --ppr 
