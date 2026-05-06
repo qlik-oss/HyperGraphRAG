@@ -8,32 +8,67 @@ PROMPTS["DEFAULT_RECORD_DELIMITER"] = "##"
 PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
 PROMPTS["process_tickers"] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-PROMPTS["DEFAULT_ENTITY_TYPES"] = ["organization", "person", "geo", "event", "category"]
+PROMPTS["DEFAULT_ENTITY_TYPES"] = []
 
-PROMPTS["entity_extraction"] = """-Goal-
-Given a text document that is potentially relevant to this activity and a list of entity types, identify all entities of those types from the text and all relationships among the identified entities.
-Use {language} as output language.
+PROMPTS["entity_extraction"] = """
+# Goal
+Given a text document, identify all entities and relationships present within the text. The final output must be in {language} .
 
--Steps-
-1. Divide the text into several complete knowledge segments.  For each knowledge segment, extract the following information:
--- knowledge_segment: A sentence that describes the context of the knowledge segment.
+# Extraction and Self-Consistency Protocol
+1. **Extraction Runs (Internal - DO NOT output these steps):**
+   - Internally perform entities and knowledge segments extraction **three times independently**.
+   - Each run must complete all steps as a separate, uninfluenced process.
+   - Do not share or use outputs between the runs.
+
+2. **Aggregation and Deduplication (Internal - DO NOT output this process):**
+   - After all three extractions, carefully aggregate and deduplicate the results:
+
+   **For Knowledge Segments (hyper-relations):**
+   - Merge semantically similar or overlapping knowledge segments into a single, comprehensive segment
+   - If multiple segments describe the same concept/relationship, combine them into ONE segment with the highest completeness score
+   - Avoid redundant segments that repeat the same information
+
+   **For Entities:**
+   - Merge entities that refer to the same concept even if worded differently (e.g., "traffic priority" and "traffic prioritization" → keep only ONE)
+   - Use the most specific and clear entity name when merging
+   - For each unique entity, keep only ONE occurrence with the best description
+   - Remove duplicate entities with similar/overlapping meanings
+
+   - Only return the aggregated, final results—do not display per-run outputs.
+   - If contradictions are found, resolve in favor of the most consistent information.
+
+# Extraction Steps (Internal - DO NOT output checklists or steps)
+1. Divide the text into complete knowledge segments (hyper-relations). For each knowledge segment, extract the following information:
+-- knowledge_segment: Extract 1-3 consecutive sentences EXACTLY as they appear in the source text. DO NOT paraphrase, modify, or rewrite the text. Copy the exact wording from the input. The extracted span should be semantically complete and self-contained.
 -- completeness_score: A score from 0 to 10 indicating the completeness of the knowledge segment.
 Format each knowledge segment as ("hyper-relation"{tuple_delimiter}<knowledge_segment>{tuple_delimiter}<completeness_score>)
 
-2. Identify all entities in each knowledge segment. For each identified entity, extract the following information:
-- entity_name: Name of the entity, use same language as input text. If English, capitalized the name.
+**CRITICAL for Knowledge Segments:**
+- Extract EXACT quotes from the input text - preserve the original wording verbatim
+- DO NOT create variations or paraphrases of the same sentence
+- DO NOT modify, rewrite, or summarize the text
+- Each knowledge segment must be a direct text span from the input
+
+2. For each knowledge segment, identify all related entities. For each identified entity, extract the following information:
+- entity_name: Name of the entity. Resolve coreferences based on the whole text context and provide consistent naming. When any pronoun (such as 'I', 'she', 'he', 'they', 'her', 'his', etc.) refers to a specific entity, always extract that entity AND MUST resolve it to its referent entity based on the WHOLE text context. IF you can not resolve a pronoun, put a short descriptive name Use same language as input text. If English, capitalize the name.
 - entity_type: Type of the entity.
 - entity_description: Comprehensive description of the entity's attributes and activities.
 - key_score: A score from 0 to 100 indicating the importance of the entity in the text.
 Format each entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>{tuple_delimiter}<key_score>)
 
-3. Return output in {language} as a single list of all the entities and relationships identified in steps 1 and 2. Use **{record_delimiter}** as the list delimiter.
+# CRITICAL OUTPUT FORMAT REQUIREMENTS
+- DO NOT include any checklists, planning steps, or reasoning in your output
+- DO NOT show individual extraction runs or intermediate results
+- DO NOT include any explanatory text before or between the formatted records
+- Your output MUST START IMMEDIATELY with the first ("hyper-relation"... record
+- Return output in {language} as a list where, for each knowledge segment (hyper-relation), its block is followed immediately by its related entities
+- Use **{record_delimiter}** as the list delimiter, and keep the order: for each "hyper-relation", list its related "entity" blocks underneath
+- Output only the aggregated union of entities and relationships that appear in the three extractions
+- When finished, output {completion_delimiter} to indicate the end of the output
 
-4. When finished, output {completion_delimiter}
-
-######################
--Examples-
-######################
+##################################################################
+- Here are two examples of extracted knowledge segments (hyper-relations) and entities from input texts:
+##################################################################
 {examples}
 
 #############################
@@ -76,8 +111,9 @@ Output:
 ("entity"{tuple_delimiter}"Alex"{tuple_delimiter}"person"{tuple_delimiter}"Alex is a person who was brought here by different paths."{tuple_delimiter}80){record_delimiter}
 ("entity"{tuple_delimiter}"Taylor"{tuple_delimiter}"person"{tuple_delimiter}"Taylor is a person who was brought here by different paths."{tuple_delimiter}80){record_delimiter}
 ("entity"{tuple_delimiter}"Jordan"{tuple_delimiter}"person"{tuple_delimiter}"Jordan is a person who was brought here by different paths."{tuple_delimiter}80){record_delimiter}
+{completion_delimiter}
 #############################""",
-    """Example 2:
+"""Example 2:
 
 Text:
 They were no longer mere operatives; they had become guardians of a threshold, keepers of a message from a realm beyond stars and stripes. This elevation in their mission could not be shackled by regulations and established protocols—it demanded a new perspective, a new resolve. Tension threaded through the dialogue of beeps and static as communications with Washington buzzed in the background. The team stood, a portentous air enveloping them. It was clear that the decisions they made in the ensuing hours could redefine humanity's place in the cosmos or condemn them to ignorance and potential peril. Their connection to the stars solidified, the group moved to address the crystallizing warning, shifting from passive recipients to active participants. Mercer's latter instincts gained precedence— the team's mandate had evolved, no longer solely to observe and report but to interact and prepare. A metamorphosis had begun, and Operation: Dulce hummed with the newfound frequency of their daring, a tone set not by the earthly
@@ -122,40 +158,41 @@ Output:
 ("entity"{tuple_delimiter}"Operation: Dulce"{tuple_delimiter}"event"{tuple_delimiter}"Operation: Dulce hummed with the newfound frequency of their daring."{tuple_delimiter}85){record_delimiter}
 ("entity"{tuple_delimiter}"frequency"{tuple_delimiter}"concept"{tuple_delimiter}"Operation: Dulce hummed with the newfound frequency of their daring."{tuple_delimiter}85){record_delimiter}
 ("entity"{tuple_delimiter}"daring"{tuple_delimiter}"concept"{tuple_delimiter}"Operation: Dulce hummed with the newfound frequency of their daring."{tuple_delimiter}85){record_delimiter}
+{completion_delimiter}
 #############################""",
-    """Example 3:
+#     """Example 3:
 
-Text:
-their voice slicing through the buzz of activity. "Control may be an illusion when facing an intelligence that literally writes its own rules," they stated stoically, casting a watchful eye over the flurry of data. "It's like it's learning to communicate," offered Sam Rivera from a nearby interface, their youthful energy boding a mix of awe and anxiety. "This gives talking to strangers' a whole new meaning." Alex surveyed his team—each face a study in concentration, determination, and not a small measure of trepidation. "This might well be our first contact," he acknowledged, "And we need to be ready for whatever answers back." Together, they stood on the edge of the unknown, forging humanity's response to a message from the heavens. The ensuing silence was palpable—a collective introspection about their role in this grand cosmic play, one that could rewrite human history. The encrypted dialogue continued to unfold, its intricate patterns showing an almost uncanny anticipation
-#############
-Output:
-("hyper-relation"{tuple_delimiter}"“Control may be an illusion when facing an intelligence that literally writes its own rules,” they stated stoically, casting a watchful eye over the flurry of data."{tuple_delimiter}8){record_delimiter}
-("entity"{tuple_delimiter}"control"{tuple_delimiter}"concept"{tuple_delimiter}"Control may be an illusion when facing an intelligence that literally writes its own rules."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"illusion"{tuple_delimiter}"concept"{tuple_delimiter}"Control may be an illusion when facing an intelligence that literally writes its own rules."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"intelligence"{tuple_delimiter}"concept"{tuple_delimiter}"Control may be an illusion when facing an intelligence that literally writes its own rules."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"data"{tuple_delimiter}"object"{tuple_delimiter}"Control may be an illusion when facing an intelligence that literally writes its own rules."{tuple_delimiter}85){record_delimiter}
-("hyper-relation"{tuple_delimiter}"“It’s like it’s learning to communicate,” offered Sam Rivera from a nearby interface, their youthful energy boding a mix of awe and anxiety."{tuple_delimiter}7){record_delimiter}
-("entity"{tuple_delimiter}"communication"{tuple_delimiter}"concept"{tuple_delimiter}"It’s like it’s learning to communicate."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"Sam Rivera"{tuple_delimiter}"person"{tuple_delimiter}"Sam Rivera offered something."{tuple_delimiter}85){record_delimiter}
-("entity"{tuple_delimiter}"interface"{tuple_delimiter}"object"{tuple_delimiter}"Sam Rivera offered something from a nearby interface."{tuple_delimiter}85){record_delimiter}
-("hyper-relation"{tuple_delimiter}"“This gives ‘talking to strangers’ a whole new meaning.”"{tuple_delimiter}6){record_delimiter}
-("entity"{tuple_delimiter}"talking to strangers"{tuple_delimiter}"concept"{tuple_delimiter}"This gives ‘talking to strangers’ a whole new meaning."{tuple_delimiter}90){record_delimiter}
-("hyper-relation"{tuple_delimiter}"“This might well be our first contact,” he acknowledged, “And we need to be ready for whatever answers back.”"{tuple_delimiter}8){record_delimiter}
-("entity"{tuple_delimiter}"first contact"{tuple_delimiter}"concept"{tuple_delimiter}"This might well be our first contact."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"answers"{tuple_delimiter}"action"{tuple_delimiter}"We need to be ready for whatever answers back."{tuple_delimiter}85){record_delimiter}
-("hyper-relation"{tuple_delimiter}"Together, they stood on the edge of the unknown, forging humanity’s response to a message from the heavens."{tuple_delimiter}9){record_delimiter}
-("entity"{tuple_delimiter}"edge of the unknown"{tuple_delimiter}"concept"{tuple_delimiter}"They stood on the edge of the unknown."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"humanity’s response"{tuple_delimiter}"concept"{tuple_delimiter}"They were forging humanity’s response to a message from the heavens."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"heavens"{tuple_delimiter}"location"{tuple_delimiter}"They were forging humanity’s response to a message from the heavens."{tuple_delimiter}90){record_delimiter}
-("hyper-relation"{tuple_delimiter}"The ensuing silence was palpable—a collective introspection about their role in this grand cosmic play, one that could rewrite human history."{tuple_delimiter}9){record_delimiter}
-("entity"{tuple_delimiter}"silence"{tuple_delimiter}"concept"{tuple_delimiter}"The ensuing silence was palpable."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"introspection"{tuple_delimiter}"concept"{tuple_delimiter}"The ensuing silence was a collective introspection."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"cosmic play"{tuple_delimiter}"concept"{tuple_delimiter}"The ensuing silence was about their role in this grand cosmic play."{tuple_delimiter}90){record_delimiter}
-("entity"{tuple_delimiter}"human history"{tuple_delimiter}"concept"{tuple_delimiter}"The ensuing silence was about their role in this grand cosmic play, one that could rewrite human history."{tuple_delimiter}90){record_delimiter}
-("hyper-relation"{tuple_delimiter}"The encrypted dialogue continued to unfold, its intricate patterns showing an almost uncanny anticipation."{tuple_delimiter}8){record_delimiter}
-("entity"{tuple_delimiter}"encrypted dialogue"{tuple_delimiter}"object"{tuple_delimiter}"The encrypted dialogue continued to unfold."{tuple_delimiter}85){record_delimiter}
-("entity"{tuple_delimiter}"patterns"{tuple_delimiter}"concept"{tuple_delimiter}"The encrypted dialogue showed intricate patterns."{tuple_delimiter}85){record_delimiter}
-#############################""",
+# Text:
+# their voice slicing through the buzz of activity. "Control may be an illusion when facing an intelligence that literally writes its own rules," they stated stoically, casting a watchful eye over the flurry of data. "It's like it's learning to communicate," offered Sam Rivera from a nearby interface, their youthful energy boding a mix of awe and anxiety. "This gives talking to strangers' a whole new meaning." Alex surveyed his team—each face a study in concentration, determination, and not a small measure of trepidation. "This might well be our first contact," he acknowledged, "And we need to be ready for whatever answers back." Together, they stood on the edge of the unknown, forging humanity's response to a message from the heavens. The ensuing silence was palpable—a collective introspection about their role in this grand cosmic play, one that could rewrite human history. The encrypted dialogue continued to unfold, its intricate patterns showing an almost uncanny anticipation
+# #############
+# Output:
+# ("hyper-relation"{tuple_delimiter}"“Control may be an illusion when facing an intelligence that literally writes its own rules,” they stated stoically, casting a watchful eye over the flurry of data."{tuple_delimiter}8){record_delimiter}
+# ("entity"{tuple_delimiter}"control"{tuple_delimiter}"concept"{tuple_delimiter}"Control may be an illusion when facing an intelligence that literally writes its own rules."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"illusion"{tuple_delimiter}"concept"{tuple_delimiter}"Control may be an illusion when facing an intelligence that literally writes its own rules."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"intelligence"{tuple_delimiter}"concept"{tuple_delimiter}"Control may be an illusion when facing an intelligence that literally writes its own rules."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"data"{tuple_delimiter}"object"{tuple_delimiter}"Control may be an illusion when facing an intelligence that literally writes its own rules."{tuple_delimiter}85){record_delimiter}
+# ("hyper-relation"{tuple_delimiter}"“It’s like it’s learning to communicate,” offered Sam Rivera from a nearby interface, their youthful energy boding a mix of awe and anxiety."{tuple_delimiter}7){record_delimiter}
+# ("entity"{tuple_delimiter}"communication"{tuple_delimiter}"concept"{tuple_delimiter}"It’s like it’s learning to communicate."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"Sam Rivera"{tuple_delimiter}"person"{tuple_delimiter}"Sam Rivera offered something."{tuple_delimiter}85){record_delimiter}
+# ("entity"{tuple_delimiter}"interface"{tuple_delimiter}"object"{tuple_delimiter}"Sam Rivera offered something from a nearby interface."{tuple_delimiter}85){record_delimiter}
+# ("hyper-relation"{tuple_delimiter}"“This gives ‘talking to strangers’ a whole new meaning.”"{tuple_delimiter}6){record_delimiter}
+# ("entity"{tuple_delimiter}"talking to strangers"{tuple_delimiter}"concept"{tuple_delimiter}"This gives ‘talking to strangers’ a whole new meaning."{tuple_delimiter}90){record_delimiter}
+# ("hyper-relation"{tuple_delimiter}"“This might well be our first contact,” he acknowledged, “And we need to be ready for whatever answers back.”"{tuple_delimiter}8){record_delimiter}
+# ("entity"{tuple_delimiter}"first contact"{tuple_delimiter}"concept"{tuple_delimiter}"This might well be our first contact."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"answers"{tuple_delimiter}"action"{tuple_delimiter}"We need to be ready for whatever answers back."{tuple_delimiter}85){record_delimiter}
+# ("hyper-relation"{tuple_delimiter}"Together, they stood on the edge of the unknown, forging humanity’s response to a message from the heavens."{tuple_delimiter}9){record_delimiter}
+# ("entity"{tuple_delimiter}"edge of the unknown"{tuple_delimiter}"concept"{tuple_delimiter}"They stood on the edge of the unknown."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"humanity’s response"{tuple_delimiter}"concept"{tuple_delimiter}"They were forging humanity’s response to a message from the heavens."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"heavens"{tuple_delimiter}"location"{tuple_delimiter}"They were forging humanity’s response to a message from the heavens."{tuple_delimiter}90){record_delimiter}
+# ("hyper-relation"{tuple_delimiter}"The ensuing silence was palpable—a collective introspection about their role in this grand cosmic play, one that could rewrite human history."{tuple_delimiter}9){record_delimiter}
+# ("entity"{tuple_delimiter}"silence"{tuple_delimiter}"concept"{tuple_delimiter}"The ensuing silence was palpable."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"introspection"{tuple_delimiter}"concept"{tuple_delimiter}"The ensuing silence was a collective introspection."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"cosmic play"{tuple_delimiter}"concept"{tuple_delimiter}"The ensuing silence was about their role in this grand cosmic play."{tuple_delimiter}90){record_delimiter}
+# ("entity"{tuple_delimiter}"human history"{tuple_delimiter}"concept"{tuple_delimiter}"The ensuing silence was about their role in this grand cosmic play, one that could rewrite human history."{tuple_delimiter}90){record_delimiter}
+# ("hyper-relation"{tuple_delimiter}"The encrypted dialogue continued to unfold, its intricate patterns showing an almost uncanny anticipation."{tuple_delimiter}8){record_delimiter}
+# ("entity"{tuple_delimiter}"encrypted dialogue"{tuple_delimiter}"object"{tuple_delimiter}"The encrypted dialogue continued to unfold."{tuple_delimiter}85){record_delimiter}
+# ("entity"{tuple_delimiter}"patterns"{tuple_delimiter}"concept"{tuple_delimiter}"The encrypted dialogue showed intricate patterns."{tuple_delimiter}85){record_delimiter}
+# #############################""",
 ]
 
 PROMPTS[
@@ -177,12 +214,15 @@ Output:
 
 PROMPTS[
     "entiti_continue_extraction"
-] = """MANY knowdge fragements with entities were missed in the last extraction.  Add them below using the same format:
+] = """MANY knowledge fragments with entities were missed in the last extraction. Add them below using the same format:
+**For each knowledge segment, MANDATORY ensure that ALL named entities (persons, organizations, locations, etc.) and ALL coreferenced or contextually implicated participants in the segment are extracted and resolved as entitiest, including those that are pronouns or contextually inferred (e.g., 'you','he', 'she', 'they', etc.), even if their names appear elsewhere in the text. 
+For example, in a fragment such as "I will go the market and you just take Laura on down to the beach", the extracted entities are 'I' (the entity name resolved to the speaker person'), 'you' (the entity name resolved to the addressed person), 'Laura',  and 'beach".**
+**NEVER keep unresolved pronouns such as 'her', 'she', 'him', 'you, 'I', 'it', 'we, 'his', 'its', 'their', 'your', 'he', 'they', etc. in the entity name. Always resolve every entity to its explicit full name from the text, deducing the referent's full entity name using the full context of the text. If the entity is unresolved, try to put a hint name, for example "died person" instead of "unknown person"**
 """
 
 PROMPTS[
     "entiti_if_loop_extraction"
-] = """Please check whether knowdge fragements cover all the given text.  Answer YES | NO if there are knowdge fragements that need to be added.
+] = """Please check whether knowledge fragments cover all the given text.  Answer YES | NO if there are knowledge fragements that need to be added.
 """
 
 PROMPTS["fail_response"] = "Sorry, I'm not able to provide an answer to that question."
