@@ -34,7 +34,7 @@ The original retrieval in HyperGraphRAG relies on semantic search + local one-ho
 ### PPR-retrieval Optimization
 
 <p align="center">
-<img src="./figs/F2.png" width="300"/>
+<img src="./figs/F2.png" width="350"/>
 </p>
 
 ## Environment Setup
