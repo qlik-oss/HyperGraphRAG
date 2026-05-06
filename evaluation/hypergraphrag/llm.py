@@ -26,6 +26,7 @@ from tenacity import (
     retry_if_exception_type,
 )
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from sentence_transformers import SentenceTransformer
 
 from .utils import (
     wrap_embedding_func_with_attrs,
@@ -1005,6 +1006,65 @@ async def hf_embedding(texts: list[str], tokenizer, embed_model) -> np.ndarray:
         return embeddings.detach().to(torch.float32).cpu().numpy()
     else:
         return embeddings.detach().cpu().numpy()
+
+@lru_cache(maxsize=2)
+def load_sentence_transformer(model_name: str):
+    model = SentenceTransformer(
+        model_name,
+        trust_remote_code=True,
+        device="cpu",
+        config_kwargs={"use_memory_efficient_attention": False, "unpad_inputs": False}
+)
+    return model
+    # return SentenceTransformer(model_name, trust_remote_code=True)
+
+@wrap_embedding_func_with_attrs(embedding_dim=1024, max_token_size=8192)
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=60),
+    retry=retry_if_exception_type((RateLimitError, APIConnectionError, Timeout)),
+)
+async def sentence_transformer_embedding(
+    texts: list[str],
+    model_name: str = "dunzhang/stella_en_400M_v5",
+    mode: str = "document",  # "document" or "query"
+    encode_kwargs: dict = None,
+) -> np.ndarray:
+    """
+    Compute embeddings using SentenceTransformer embeddings.
+    
+    Args:
+        texts: str or list of str texts to embed.
+        model_name: model repo or path (default: "dunzhang/stella_en_400M_v5").
+        mode: "query" to encode queries; "document" for passages; defaults to "document".
+        encode_kwargs: additional kwargs forwarded to encoding method.
+        
+    Returns:
+        np.ndarray: embeddings array.
+    """
+    if isinstance(texts, str):
+        texts = [texts]
+
+    model = load_sentence_transformer(model_name)
+   # Prefer GPU if available
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    try:
+        model.to(device)
+    except Exception:
+        pass
+
+    # defaults safe for memory
+    defaults = dict(batch_size=5, show_progress_bar=True, convert_to_numpy=True)
+    if encode_kwargs:
+        defaults.update(encode_kwargs)
+    # defaults safe for memory
+    defaults = dict(batch_size=5, show_progress_bar=True, convert_to_numpy=True)
+    if encode_kwargs:
+        defaults.update(encode_kwargs)
+            
+    embeddings = model.encode(texts, device=device, **defaults) # type: ignore
+
+    return embeddings
 
 
 async def ollama_embedding(texts: list[str], embed_model, **kwargs) -> np.ndarray:

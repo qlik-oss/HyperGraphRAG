@@ -8,7 +8,7 @@ from typing import Type, cast
 
 from .llm import (
     gpt_4o_mini_complete,
-    openai_embedding,
+    sentence_transformer_embedding,
 )
 from .operate import (
     chunking_by_token_size,
@@ -38,13 +38,6 @@ from .storage import (
     NanoVectorDBStorage,
     NetworkXStorage,
 )
-
-# future KG integrations
-
-# from .kg.ArangoDB_impl import (
-#     GraphStorage as ArangoDBStorage
-# )
-
 
 def lazy_external_import(module_name: str, class_name: str):
     """Lazily import a class from an external module based on the package of the caller."""
@@ -138,7 +131,7 @@ class HyperGraphRAG:
     node_embedding_algorithm: str = "node2vec"
     node2vec_params: dict = field(
         default_factory=lambda: {
-            "dimensions": 1536,
+            "dimensions": 1024,
             "num_walks": 10,
             "walk_length": 40,
             "window_size": 2,
@@ -148,14 +141,14 @@ class HyperGraphRAG:
     )
 
     # embedding_func: EmbeddingFunc = field(default_factory=lambda:hf_embedding)
-    embedding_func: EmbeddingFunc = field(default_factory=lambda: openai_embedding)
+    embedding_func: EmbeddingFunc = field(default_factory=lambda: sentence_transformer_embedding)
     embedding_batch_num: int = 32
     embedding_func_max_async: int = 16
 
     # LLM
     llm_model_func: callable = gpt_4o_mini_complete  # hf_model_complete#
-    llm_model_name: str = "meta-llama/Llama-3.2-1B-Instruct"  #'meta-llama/Llama-3.2-1B'#'google/gemma-2-2b-it'
-    llm_model_max_token_size: int = 32768
+    #llm_model_name: str = "meta-llama/Llama-3.2-1B-Instruct"  #'meta-llama/Llama-3.2-1B'#'google/gemma-2-2b-it'
+    llm_model_max_token_size: int = 64768
     llm_model_max_async: int = 16
     llm_model_kwargs: dict = field(default_factory=dict)
 
