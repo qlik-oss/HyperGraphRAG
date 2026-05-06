@@ -1,10 +1,15 @@
 import asyncio
 import json
+import logging
 import re
+import copy
 from tqdm.asyncio import tqdm as tqdm_async
-from typing import Union
+from typing import Union, Callable
 from collections import Counter, defaultdict
 import warnings
+import igraph as ig
+import numpy as np
+import math
 from .utils import (
     logger,
     clean_str,
@@ -20,6 +25,8 @@ from .utils import (
     compute_args_hash,
     handle_cache,
     save_to_cache,
+    normalize_entity_name,
+    min_max_normalize,
     CacheData,
 )
 from .base import (
@@ -52,6 +59,18 @@ def chunking_by_token_size(
         )
     return results
 
+async def build_entity_to_chunk_ids_map(knowledge_graph_inst: BaseGraphStorage) -> dict[str, set[str]]:
+    # Build entity -> set of chunk ids mapping
+    SEP_TOKEN = "<SEP>"
+    entity_to_chunk_ids = defaultdict(set)
+    for node_id, node_data in await knowledge_graph_inst.get_all_nodes():
+        if node_data.get("role") == "entity":
+            source_ids = node_data.get("source_id", "")
+            if source_ids and source_ids != "UNKNOWN":
+                chunk_ids = [cid.strip() for cid in source_ids.split(SEP_TOKEN) if cid.strip()]
+                entity_to_chunk_ids[node_id].update(chunk_ids)
+
+    return entity_to_chunk_ids
 
 async def _handle_entity_relation_summary(
     entity_or_relation_name: str,
@@ -80,7 +99,7 @@ async def _handle_entity_relation_summary(
     )
     use_prompt = prompt_template.format(**context_base)
     logger.debug(f"Trigger summary: {entity_or_relation_name}")
-    summary = await use_llm_func(use_prompt, max_tokens=summary_max_tokens)
+    summary, metadata = await use_llm_func(use_prompt, max_tokens=summary_max_tokens)
     return summary
 
 
@@ -173,7 +192,8 @@ async def _merge_nodes_then_upsert(
     already_entity_types = []
     already_source_ids = []
     already_description = []
-
+    entity_name = normalize_entity_name(entity_name)
+    # Check if the node already exists in the knowledge graph
     already_node = await knowledge_graph_inst.get_node(entity_name)
     if already_node is not None:
         already_entity_types.append(already_node["entity_type"])
@@ -268,6 +288,12 @@ async def extract_entities(
     use_llm_func: callable = global_config["llm_model_func"]
     entity_extract_max_gleaning = global_config["entity_extract_max_gleaning"]
 
+    # Tokens usages statistics
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_cached_tokens = 0
+    num_cache_hit = 0
+
     ordered_chunks = list(chunks.items())
     # add language and example number params to prompt
     language = global_config["addon_params"].get(
@@ -313,6 +339,7 @@ async def extract_entities(
 
     async def _process_single_content(chunk_key_dp: tuple[str, TextChunkSchema]):
         nonlocal already_processed, already_entities, already_relations
+        nonlocal total_prompt_tokens, total_completion_tokens, total_cached_tokens, num_cache_hit
         chunk_key = chunk_key_dp[0]
         chunk_dp = chunk_key_dp[1]
         content = chunk_dp["content"]
@@ -321,19 +348,43 @@ async def extract_entities(
             **context_base, input_text="{input_text}"
         ).format(**context_base, input_text=content)
 
-        final_result = await use_llm_func(hint_prompt)
+        final_result, metadata = await use_llm_func(hint_prompt)
+        total_prompt_tokens += metadata.get('prompt_tokens', 0)
+        total_completion_tokens += metadata.get('completion_tokens', 0)
+        total_cached_tokens += metadata.get('cached_tokens', 0)
+        if metadata.get('cache_hit'):
+            num_cache_hit += 1
+
         history = pack_user_ass_to_openai_messages(hint_prompt, final_result)
         for now_glean_index in range(entity_extract_max_gleaning):
-            glean_result = await use_llm_func(continue_prompt, history_messages=history)
+            logger.debug(f"gleaning entities for {entity_extract_max_gleaning}")
+            logger.debug(f"continue_prompt: {continue_prompt}")
+            logger.debug(f"history_messages: {history}")
+
+            glean_result, glean_metadata = await use_llm_func(continue_prompt, history_messages=history)
+            total_prompt_tokens += glean_metadata.get('prompt_tokens', 0)
+            total_completion_tokens += glean_metadata.get('completion_tokens', 0)
+            total_cached_tokens += glean_metadata.get('cached_tokens', 0)
+
+            if glean_metadata.get('cache_hit'):
+                num_cache_hit += 1
 
             history += pack_user_ass_to_openai_messages(continue_prompt, glean_result)
+            
+            logger.debug(f"all history: {history}")
             final_result += glean_result
             if now_glean_index == entity_extract_max_gleaning - 1:
                 break
 
-            if_loop_result: str = await use_llm_func(
+            if_loop_result, loop_metadata = await use_llm_func(
                 if_loop_prompt, history_messages=history
             )
+            total_prompt_tokens += loop_metadata.get('prompt_tokens', 0)
+            total_completion_tokens += loop_metadata.get('completion_tokens', 0)
+            total_cached_tokens += loop_metadata.get('cached_tokens', 0)
+
+            if loop_metadata.get('cache_hit'):
+                num_cache_hit += 1
             if_loop_result = if_loop_result.strip().strip('"').strip("'").lower()
             if if_loop_result != "yes":
                 break
@@ -367,7 +418,21 @@ async def extract_entities(
                 record_attributes, chunk_key, now_hyper_relation
             )
             if if_entities is not None:
-                maybe_nodes[if_entities["entity_name"]].append(if_entities)
+                # Check for duplicates before appending
+                entity_name = if_entities["entity_name"]
+                existing_entities = maybe_nodes[entity_name]
+
+                # Check if an identical or very similar entity already exists
+                is_duplicate = False
+                for existing in existing_entities:
+                    if (existing["hyper_relation"] == if_entities["hyper_relation"] and
+                        existing["description"].lower() == if_entities["description"].lower()):
+                        # Exact duplicate found, skip it
+                        is_duplicate = True
+                        break
+
+                if not is_duplicate:
+                    maybe_nodes[entity_name].append(if_entities)
                 continue
             
         already_processed += 1
@@ -383,14 +448,27 @@ async def extract_entities(
         )
         return dict(maybe_nodes), dict(maybe_edges)
 
+    process_semaphore = asyncio.Semaphore(8)  # Limit to 8 concurrent tasks
+
+    async def _process_with_limit(chunk):
+        async with process_semaphore:
+            return await _process_single_content(chunk)
+    
     results = []
-    for result in tqdm_async(
-        asyncio.as_completed([_process_single_content(c) for c in ordered_chunks]),
+    progress_bar = tqdm_async(
+        asyncio.as_completed([_process_with_limit(c) for c in ordered_chunks]),
         total=len(ordered_chunks),
         desc="Extracting entities from chunks",
         unit="chunk",
-    ):
+    )
+    for result in progress_bar:
         results.append(await result)
+        progress_bar.set_postfix({
+            'total_prompt_tokens': total_prompt_tokens,
+            'total_completion_tokens': total_completion_tokens,
+            'num_cache_hit': num_cache_hit,
+            'total_cached_tokens': total_cached_tokens
+        })
 
     maybe_nodes = defaultdict(list)
     maybe_edges = defaultdict(list)
@@ -471,7 +549,7 @@ async def extract_entities(
     if entity_vdb is not None:
         data_for_vdb = {
             compute_mdhash_id(dp["entity_name"], prefix="ent-"): {
-                "content": dp["entity_name"] + dp["description"],
+                "content": dp["entity_name"] + ' ' + dp["description"],
                 "entity_name": dp["entity_name"],
             }
             for dp in all_entities_data
@@ -487,11 +565,13 @@ async def kg_query(
     entities_vdb: BaseVectorStorage,
     hyperedges_vdb: BaseVectorStorage,
     text_chunks_db: BaseKVStorage[TextChunkSchema],
+    chunks_vdb: BaseVectorStorage,  
     query_param: QueryParam,
     global_config: dict,
     hashing_kv: BaseKVStorage = None,
 ) -> str:
     # Handle cache
+    query_param.query = query
     use_model_func = global_config["llm_model_func"]
     args_hash = compute_args_hash(query_param.mode, query)
     cached_response, quantized, min_val, max_val = await handle_cache(
@@ -571,16 +651,22 @@ async def kg_query(
     if hl_keywords == [] and ll_keywords == []:
         logger.warning("low_level_keywords and high_level_keywords is empty")
         return PROMPTS["fail_response"]
-    if ll_keywords == [] and query_param.mode in ["hybrid"]:
+    if ll_keywords == [] and query_param.mode in ["hybrid","local"]:
         logger.warning("low_level_keywords is empty")
-        return PROMPTS["fail_response"]
+        ll_keywords = query
     else:
         ll_keywords = ", ".join(ll_keywords)
-    if hl_keywords == [] and query_param.mode in ["hybrid"]:
+    if hl_keywords == [] and query_param.mode in ["hybrid","global"]:
         logger.warning("high_level_keywords is empty")
-        return PROMPTS["fail_response"]
+        hl_keywords = query
     else:
         hl_keywords = ", ".join(hl_keywords)
+
+    # Only build entity->chunk map when PPR is active (it's the only consumer)
+    if query_param.use_ppr_text_units:
+        entity_to_chunk_ids = await build_entity_to_chunk_ids_map(knowledge_graph_inst)
+    else:
+        entity_to_chunk_ids = {}
 
     # Build context
     keywords = [ll_keywords, hl_keywords]
@@ -590,7 +676,9 @@ async def kg_query(
         entities_vdb,
         hyperedges_vdb,
         text_chunks_db,
+        chunks_vdb,
         query_param,
+        entity_to_chunk_ids,
     )
 
     if query_param.only_need_context:
@@ -603,7 +691,7 @@ async def kg_query(
     )
     if query_param.only_need_prompt:
         return sys_prompt
-    response = await use_model_func(
+    response, metadata = await use_model_func(
         query,
         system_prompt=sys_prompt,
         stream=query_param.stream,
@@ -641,12 +729,14 @@ async def _build_query_context(
     entities_vdb: BaseVectorStorage,
     hyperedges_vdb: BaseVectorStorage,
     text_chunks_db: BaseKVStorage[TextChunkSchema],
+    chunks_vdb: BaseVectorStorage,
     query_param: QueryParam,
+    entity_to_chunk_ids: dict[str, set[str]],
 ):
 
-    ll_kewwords, hl_keywrds = query[0], query[1]
+    ll_keywords, hl_keywords = query[0], query[1]
     if query_param.mode in ["local", "hybrid"]:
-        if ll_kewwords == "":
+        if ll_keywords == "":
             ll_entities_context, ll_relations_context, ll_text_units_context = (
                 "",
                 "",
@@ -662,14 +752,15 @@ async def _build_query_context(
                 ll_relations_context,
                 ll_text_units_context,
             ) = await _get_node_data(
-                ll_kewwords,
+                ll_keywords,
                 knowledge_graph_inst,
                 entities_vdb,
                 text_chunks_db,
                 query_param,
+                entity_to_chunk_ids,
             )
     if query_param.mode in ["global", "hybrid"]:
-        if hl_keywrds == "":
+        if hl_keywords == "":
             hl_entities_context, hl_relations_context, hl_text_units_context = (
                 "",
                 "",
@@ -685,11 +776,12 @@ async def _build_query_context(
                 hl_relations_context,
                 hl_text_units_context,
             ) = await _get_edge_data(
-                hl_keywrds,
+                hl_keywords,
                 knowledge_graph_inst,
                 hyperedges_vdb,
                 text_chunks_db,
                 query_param,
+                entity_to_chunk_ids,
             )
             if (
                 hl_entities_context == ""
@@ -716,20 +808,31 @@ async def _build_query_context(
             hl_relations_context,
             hl_text_units_context,
         )
+    
+    # PPR optimization enabled, run PPR text units ranking
+    if  query_param.ppr_enabled:
+        ppr_text_units_context = await _ppr_rank_text_units(
+            query_param=query_param,
+            knowledge_graph_inst=knowledge_graph_inst,
+            text_chunks_db=text_chunks_db,
+            chunks_vdb=chunks_vdb,
+        )
+        text_units_context = ppr_text_units_context if ppr_text_units_context else text_units_context
+
     return f"""
------Entities-----
-```csv
-{entities_context}
-```
------Relationships-----
-```csv
-{relations_context}
-```
------Sources-----
-```csv
-{text_units_context}
-```
-"""
+        -----Entities-----
+        ```csv
+        {entities_context}
+        ```
+        -----Relationships-----
+        ```csv
+        {relations_context}
+        ```
+        -----Sources-----
+        ```csv
+        {text_units_context}
+        ```
+        """
 
 
 async def _get_node_data(
@@ -738,11 +841,23 @@ async def _get_node_data(
     entities_vdb: BaseVectorStorage,
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     query_param: QueryParam,
+    entity_to_chunk_ids: dict[str, set[str]],
 ):
     # get similar entities
     results = await entities_vdb.query(query, top_k=query_param.top_k)
     if not len(results):
         return "", "", ""
+    
+    # Normalize entity distances and store similarities only when PPR is active
+    if query_param.ppr_enabled:
+        # Normalize entity distance by chunk connectivity to avoid bias towards generic entities.
+        for r in results:
+            chunk_ids = entity_to_chunk_ids.get(r["entity_name"], set())
+            chunk_count = len(chunk_ids) if len(chunk_ids) > 0 else 1
+            r["distance"] /= chunk_count
+            prev_val = query_param._entity_sims.get(r["entity_name"], 0.0)
+            query_param._entity_sims[r["entity_name"]] = max(float(r.get("distance", 0.0)), prev_val)
+
     # get entity information
     node_datas = await asyncio.gather(
         *[knowledge_graph_inst.get_node(r["entity_name"]) for r in results]
@@ -920,7 +1035,7 @@ async def _find_most_related_edges_from_entities(
     )
     all_nodes = []
     for this_nodes in all_related_nodes:
-        all_nodes.append("|".join([n[1] for n in this_nodes]))
+        all_nodes.append(GRAPH_FIELD_SEP.join([n[1] for n in this_nodes]))
     all_edges_data = [
         {**e, "related_nodes": n}
         for e, n in zip(all_edges_data, all_nodes)
@@ -934,6 +1049,8 @@ async def _get_edge_data(
     hyperedges_vdb: BaseVectorStorage,
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     query_param: QueryParam,
+    entity_to_chunk_ids: dict[str, set[str]],
+    use_noisy_or: bool = True,    
 ):
     results = await hyperedges_vdb.query(keywords, top_k=query_param.top_k)
 
@@ -957,6 +1074,9 @@ async def _get_edge_data(
     edge_datas = sorted(
         edge_datas, key=lambda x: (x["rank"], x["weight"]), reverse=True
     )
+    if query_param.ppr_enabled:
+        query_param._hyperedge_sims.update({e["hyperedge"]: e["rank"] for e in edge_datas})
+    
     edge_datas = truncate_list_by_token_size(
         edge_datas,
         key=lambda x: x["hyperedge"],
@@ -967,7 +1087,7 @@ async def _get_edge_data(
     )
     all_nodes = []
     for this_nodes in all_related_nodes:
-        all_nodes.append("|".join([n[1] for n in this_nodes]))
+        all_nodes.append(GRAPH_FIELD_SEP.join([n[1] for n in this_nodes]))
     edge_datas = [
         {**e, "related_nodes": n}
         for e, n in zip(edge_datas, all_nodes)
@@ -976,6 +1096,35 @@ async def _get_edge_data(
     use_entities = await _find_most_related_entities_from_relationships(
         edge_datas, query_param, knowledge_graph_inst
     )
+
+    # Propagate hyperedge similarity to connected entities — only needed for PPR
+    if query_param.ppr_enabled:
+        entity_hyperedge_counts = defaultdict(int)
+        entity_hyperedge_scores = defaultdict(float)
+        for edge in edge_datas:
+            hyperedge_name = edge["hyperedge"]
+            hyperedge_score = query_param._hyperedge_sims.get(hyperedge_name, 1.0)
+            for entity_name in edge['related_nodes'].split(GRAPH_FIELD_SEP):
+                entity_name = entity_name.strip()
+                if entity_name:
+                    weighted_score = hyperedge_score
+                    chunk_count = len(entity_to_chunk_ids.get(entity_name, set()))
+                    if chunk_count > 0:
+                        weighted_score /= chunk_count
+                    entity_hyperedge_scores[entity_name] += weighted_score
+                    entity_hyperedge_counts[entity_name] += 1
+        # Noisy-OR: entities shared across more hyperedges get higher scores
+        # while remaining bounded in [0, 1].  Each hyperedge is an independent
+        # "observation"; the probability of NOT being relevant shrinks with count.
+        #   score_final = 1 - (1 - avg) ** (1 + log(count))
+        for entity in entity_hyperedge_scores:
+            count = entity_hyperedge_counts[entity]
+            if count > 0:
+                avg_score = entity_hyperedge_scores[entity] / count
+                new_val = 1.0 - (1.0 - avg_score) ** (1 + math.log(count))
+                prev_val = query_param._entity_sims.get(entity, 0.0)
+                query_param._entity_sims[entity] = max(new_val, prev_val)
+    
     use_text_units = await _find_related_text_unit_from_relationships(
         edge_datas, query_param, text_chunks_db, knowledge_graph_inst
     )
@@ -1044,6 +1193,7 @@ async def _find_most_related_entities_from_relationships(
     node_datas = [
         {**n, "entity_name": k, "rank": d}
         for k, n, d in zip(entity_names, node_datas, node_degrees)
+        if n is not None and n.get("role") == "entity"
     ]
 
     node_datas = truncate_list_by_token_size(
@@ -1122,3 +1272,231 @@ def combine_contexts(entities, relationships, sources):
     combined_sources = process_combine_contexts(hl_sources, ll_sources)
 
     return combined_entities, combined_relationships, combined_sources
+
+def _truncate_text_units(
+    items: list,
+    query_param: QueryParam,
+    content_getter: Callable,
+    score_key: str | None = None,
+):
+    """
+    Generic truncation for text unit candidates.
+
+    items: list of arbitrary objects (dicts)
+    content_getter: function(item)-> str (raw text)
+    score_key: if provided and mode == topk, items will be sorted descending by this key
+    """
+    if not items:
+        return items
+    mode = getattr(query_param, "text_unit_truncate_mode", "tokens")
+    if mode == "topk":
+        # Sort by score if available
+        if score_key and all(score_key in it for it in items):
+            items = sorted(items, key=lambda x: x[score_key], reverse=True)
+        # Keep first top_k_text_units
+        k = getattr(query_param, "top_k_text_units", 20)
+        return items[:k]
+    # Default: token-based truncation
+    truncated = truncate_list_by_token_size(
+        items,
+        key=lambda x: content_getter(x),
+        max_token_size=query_param.max_token_for_text_unit,
+    )
+    return truncated
+
+async def build_graph_with_chunks(knowledge_graph_inst: BaseGraphStorage):
+    """
+    Build chunk nodes and connect them to entities and hyperedges based on source_ids.
+    If include_hyperedge is False, remove hyperedge nodes from the graph.
+
+    Args:
+        graph_inst: The graph storage instance to build chunks for
+        include_hyperedge: If True, create edges from hyperedges to chunks and keep them.
+                          If False, remove hyperedge nodes from the graph.
+
+    Returns:
+        The modified graph instance with chunk nodes added
+    """
+    SEP_TOKEN = "<SEP>"
+    nodes_data_list = await knowledge_graph_inst.get_all_nodes()
+
+    for node_id, node_data in nodes_data_list:
+        node_role = node_data.get("role", "")
+
+        source_ids = node_data.get("source_id", "")
+        if not source_ids or source_ids == "UNKNOWN":
+            continue
+        chunk_ids = [cid.strip() for cid in source_ids.split(SEP_TOKEN) if cid.strip()]
+        for chunk_id in chunk_ids:
+            if not await knowledge_graph_inst.has_node(chunk_id):
+                await knowledge_graph_inst.upsert_node(chunk_id, {"role": "chunk"})
+            await knowledge_graph_inst.upsert_edge(node_id, chunk_id, edge_data={})
+
+    return knowledge_graph_inst
+
+async def dense_chunk_retrieval(query_text, chunks_vdb, top_k):
+    """
+    Retrieve chunk IDs and similarity scores using dense retrieval, then min-max normalize.
+    Returns: (sorted_chunk_ids, normalized_scores, chunk_sims_dict)
+    """
+    chunk_results = await chunks_vdb.query(query_text, top_k=top_k)
+    chunk_ids = []
+    chunk_scores = []
+    for result in chunk_results:
+        chunk_id = result.get("id")
+        similarity = float(result.get("distance", 0.0))
+        chunk_ids.append(chunk_id)
+        chunk_scores.append(similarity)
+    
+    if not chunk_ids:
+        logging.info("No chunks found in dense retrieval.")
+
+    normalized_scores = min_max_normalize(chunk_scores)
+    sorted_indices = np.argsort(normalized_scores)[::-1]
+    sorted_chunk_ids = [chunk_ids[i] for i in sorted_indices[:top_k]]
+    sorted_chunk_scores = normalized_scores[sorted_indices[:top_k]]
+    return sorted_chunk_ids, sorted_chunk_scores
+
+async def _ppr_rank_text_units(
+    query_param: QueryParam,
+    knowledge_graph_inst: BaseGraphStorage,
+    text_chunks_db: BaseKVStorage[TextChunkSchema],
+    chunks_vdb: BaseVectorStorage,
+    alpha: float = 0.5, #default 0.4 best 0.3
+    passage_node_weight: float = 0.5, # best 0.3, but with maud best 0.9
+    top_ent_h: bool = True,
+    top_n_ent: int = 5, # seems est 5, but 10 best for maud
+    top_h_ent: int = 10,
+    top_k_chunks: int = 100,
+):
+    """
+    Build a small subgraph (entities + hyperedges + chunk ids) and run personalized PageRank.
+    Personalization vector derives from embedding similarity stored in query_param._entity_sims / _hyperedge_sims.
+    """
+    logging.info("Running PPR ranking for text units...")
+    local_kg_inst = copy.deepcopy(knowledge_graph_inst)
+    local_kg_inst = await build_graph_with_chunks(local_kg_inst)
+
+    entity_sims = getattr(query_param, "_entity_sims", {})
+    hyper_sims = getattr(query_param, "_hyperedge_sims", {})
+    entity_names_from_sims = list(entity_sims.keys())
+    hyperedge_names_from_sims = list(hyper_sims.keys())
+    
+    nodes = await local_kg_inst.get_all_nodes()
+    edges = await local_kg_inst.get_all_edges()
+
+    logging.debug(f"[PPR] Graph nodes={len(nodes)}")
+
+    # Map node names to indices
+    idx_map = {n: i for i, n in enumerate(nodes)}
+    pers = np.zeros(len(nodes))
+
+    top_entity_names = set()
+    top_hyperedge_names = set()
+    if top_ent_h:
+        top_entity_names = sorted(entity_names_from_sims, key=lambda n: entity_sims.get(n, 0.0), reverse=True)[:top_n_ent]
+        top_hyperedge_names = sorted(hyperedge_names_from_sims, key=lambda h: hyper_sims.get(h, 0.0), reverse=True)[:top_h_ent]
+
+    # --- Personalization mapping (node -> score) --------------------------------
+
+    # Normalize entity and hyperedge scores to the same [0, 1] scale
+    entity_vals = np.array([max(entity_sims.get(n, 0.0), 0.0) for n in entity_names_from_sims]) if entity_names_from_sims else np.array([])
+    hyper_vals = np.array([max(hyper_sims.get(h, 0.0), 0.0) for h in hyperedge_names_from_sims]) if hyperedge_names_from_sims else np.array([])
+
+    entity_vals_norm = min_max_normalize(entity_vals)
+    hyper_vals_norm = min_max_normalize(hyper_vals)
+
+    entity_sims_norm = {n: float(v) for n, v in zip(entity_names_from_sims, entity_vals_norm)} if len(entity_vals_norm) > 0 else {}
+    hyper_sims_norm = {h: float(v) for h, v in zip(hyperedge_names_from_sims, hyper_vals_norm)} if len(hyper_vals_norm) > 0 else {}
+
+    # Personalization for entities and hyperedges (using normalized scores)
+    for n in entity_names_from_sims:
+        if n in idx_map:
+            pers[idx_map[n]] = entity_sims_norm.get(n, 0.0) if (not top_ent_h or n in top_entity_names) else 0.0
+        else:
+            logging.warning(f"[PPR] Entity '{n}' not found in graph nodes.")
+
+    for h in hyperedge_names_from_sims:
+                if h in idx_map:
+                    pers[idx_map[h]] = hyper_sims_norm.get(h, 0.0) if (not top_ent_h or h in top_hyperedge_names) else 0.0
+                else:
+                    logging.warning(f"[PPR] Hyperedge '{h}' not found in graph nodes.")
+
+    # --- Add chunk weights based on embedding similarity ---
+    query_text = getattr(query_param, "query", "")
+    sorted_chunk_ids = []
+    normalized_scores = []
+    if passage_node_weight > 0 and query_text:
+        sorted_chunk_ids, normalized_scores = await dense_chunk_retrieval(
+            query_text, chunks_vdb, top_k=top_k_chunks
+        )
+
+        # Return empty string if no relevant chunks found
+        if normalized_scores is not None and len(normalized_scores) > 0:
+            logging.info(f"[PPR] Applied passage weights to {len(sorted_chunk_ids)} chunks (min={min(normalized_scores):.4f}, max={max(normalized_scores):.4f}).")
+        else:
+            return ""
+        # Attribute weights to chunk nodes
+        for c_id, norm_score in zip(sorted_chunk_ids, normalized_scores):
+                if c_id in idx_map:
+                    pers[idx_map[c_id]] = norm_score * passage_node_weight
+                else:
+                    logging.warning(f"[PPR] Chunk '{c_id}' not found in graph nodes.")
+
+    chunk_rows = []
+    pers = np.where(np.isnan(pers) | (pers < 0), 0, pers)
+    
+    # Build igraph
+    g = ig.Graph(directed=False)
+    g.add_vertices(len(nodes))
+    g.add_edges([(idx_map[src], idx_map[tgt]) for src, tgt, *_ in edges]) # type: ignore
+    g.es["weight"] = [1.0] * len(g.es)
+    
+    try:
+        rank = g.personalized_pagerank(
+            vertices=range(len(nodes)),
+            damping=alpha,
+            directed=False,
+            weights="weight",
+            reset=pers,
+            implementation="prpack"
+        )
+    except Exception as e:
+        logging.warning(f"[PPR] igraph PRPACK failed ({e}), returning empty.")
+        return ""    
+    
+    # Extract chunk node scores
+    chunk_scores = []
+    for c_id in nodes:
+        if c_id in idx_map:
+            node_data = await local_kg_inst.get_node(c_id)
+            if node_data is not None and node_data.get("role") == "chunk":
+                chunk_scores.append((c_id, rank[idx_map[c_id]]))
+    
+    if not chunk_scores:
+        return ""
+
+    # Sort chunks
+    chunk_scores.sort(key=lambda x: x[1], reverse=True)
+    
+    # Fetch chunk contents
+    for c_id, score in chunk_scores:
+        row = await text_chunks_db.get_by_id(c_id)
+        if not row or "content" not in row:
+            continue
+        chunk_rows.append({"id": c_id, "score": score, "content": row["content"]})
+
+
+    # Truncate by configured mode (top-k or tokens budget)
+    chunk_rows = _truncate_text_units(
+        chunk_rows,
+        query_param,
+        content_getter=lambda x: x["content"],
+        score_key="score",  # PPR provides score
+    )
+
+    # Build CSV
+    csv_rows = [["id", "score", "content"]]
+    for i, r in enumerate(chunk_rows):
+        csv_rows.append([i, f"{r['score']:.4f}", r["content"]])
+    return list_of_list_to_csv(csv_rows)

@@ -65,7 +65,7 @@ class JsonKVStorage(BaseKVStorage):
 
 @dataclass
 class NanoVectorDBStorage(BaseVectorStorage):
-    cosine_better_than_threshold: float = 0.2
+    cosine_better_than_threshold: float = 0.4
 
     def __post_init__(self):
         self._client_file_name = os.path.join(
@@ -250,7 +250,7 @@ class NetworkXStorage(BaseGraphStorage):
         self._node_embed_algorithms = {
             "node2vec": self._node2vec_embed,
         }
-
+    
     async def index_done_callback(self):
         NetworkXStorage.write_nx_graph(self._graph, self._graphml_xml_file)
 
@@ -278,6 +278,12 @@ class NetworkXStorage(BaseGraphStorage):
         if self._graph.has_node(source_node_id):
             return list(self._graph.edges(source_node_id))
         return None
+
+    async def get_all_nodes(self) -> list[tuple[str, dict]]:
+        return list(self._graph.nodes())
+
+    async def get_all_edges(self) -> list[tuple[str, str, dict]]:
+        return list(self._graph.edges())
 
     async def upsert_node(self, node_id: str, node_data: dict[str, str]):
         self._graph.add_node(node_id, **node_data)

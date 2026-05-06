@@ -30,6 +30,18 @@ class QueryParam:
     max_token_for_global_context: int = 4000
     # Number of tokens for the entity descriptions
     max_token_for_local_context: int = 4000
+    # Truncation mode for text units:
+    # "tokens" -> keep as many chunks as fit into max_token_for_text_unit (old behavior)
+    # "topk"   -> keep top_k_text_units based on score (if available) or order
+    text_unit_truncate_mode: Literal["tokens", "topk"] = "topk"
+    top_k_text_units: int = 5
+    # query
+    query: str = ""
+    # ---- Runtime / personalization (filled during query) ----
+    _entity_sims: dict = field(default_factory=dict)      # entities similarity scores
+    _hyperedge_sims: dict = field(default_factory=dict)   # hyperedges similarity scores
+    # # ---- PPR controls ----
+    ppr_enabled: bool = True  # enable PPR ranking
 
 
 @dataclass
@@ -125,6 +137,14 @@ class BaseGraphStorage(StorageNameSpace):
         raise NotImplementedError
 
     async def delete_node(self, node_id: str):
+        raise NotImplementedError
+
+    async def get_all_nodes(self) -> list[tuple[str, dict]]:
+        """Return all nodes as a list of (node_id, node_data) tuples."""
+        raise NotImplementedError
+
+    async def get_all_edges(self) -> list[tuple[str, str, dict]]:
+        """Return all edges as a list of (src_id, tgt_id, edge_data) tuples."""
         raise NotImplementedError
 
     async def embed_nodes(self, algorithm: str) -> tuple[np.ndarray, list[str]]:

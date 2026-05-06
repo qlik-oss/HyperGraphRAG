@@ -5,10 +5,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import partial
 from typing import Type, cast
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from .llm import (
     gpt_4o_mini_complete,
-    openai_embedding,
+    sentence_transformer_embedding,
 )
 from .operate import (
     chunking_by_token_size,
@@ -38,13 +39,6 @@ from .storage import (
     NanoVectorDBStorage,
     NetworkXStorage,
 )
-
-# future KG integrations
-
-# from .kg.ArangoDB_impl import (
-#     GraphStorage as ArangoDBStorage
-# )
-
 
 def lazy_external_import(module_name: str, class_name: str):
     """Lazily import a class from an external module based on the package of the caller."""
@@ -138,7 +132,7 @@ class HyperGraphRAG:
     node_embedding_algorithm: str = "node2vec"
     node2vec_params: dict = field(
         default_factory=lambda: {
-            "dimensions": 1536,
+            "dimensions": 1024,
             "num_walks": 10,
             "walk_length": 40,
             "window_size": 2,
@@ -148,14 +142,14 @@ class HyperGraphRAG:
     )
 
     # embedding_func: EmbeddingFunc = field(default_factory=lambda:hf_embedding)
-    embedding_func: EmbeddingFunc = field(default_factory=lambda: openai_embedding)
+    embedding_func: EmbeddingFunc = field(default_factory=lambda: sentence_transformer_embedding)
     embedding_batch_num: int = 32
     embedding_func_max_async: int = 16
 
     # LLM
     llm_model_func: callable = gpt_4o_mini_complete  # hf_model_complete#
-    llm_model_name: str = "meta-llama/Llama-3.2-1B-Instruct"  #'meta-llama/Llama-3.2-1B'#'google/gemma-2-2b-it'
-    llm_model_max_token_size: int = 32768
+    #llm_model_name: str = "meta-llama/Llama-3.2-1B-Instruct"  #'meta-llama/Llama-3.2-1B'#'google/gemma-2-2b-it'
+    llm_model_max_token_size: int = 64768
     llm_model_max_async: int = 16
     llm_model_kwargs: dict = field(default_factory=dict)
 
@@ -266,6 +260,26 @@ class HyperGraphRAG:
             "OracleGraphStorage": OracleGraphStorage,
             # "ArangoDBStorage": ArangoDBStorage
         }
+    
+    def recursive_chunking_langchain(
+        self,
+        content: str,
+        chunk_size: int = 1200,
+        chunk_overlap: int = 100,
+        model_name: str = "gpt-4o-mini"
+    ):
+        splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+            model_name=model_name,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""],  # hierarchical fallbacks
+            keep_separator=True,
+            add_start_index=True
+        )
+
+        # Split and filter out empty/whitespace-only chunks
+        chunks = splitter.split_text(content)
+        return [chunk for chunk in chunks if chunk.strip()]
 
     def insert(self, string_or_strings):
         loop = always_get_an_event_loop()
@@ -293,16 +307,17 @@ class HyperGraphRAG:
             for doc_key, doc in tqdm_async(
                 new_docs.items(), desc="Chunking documents", unit="doc"
             ):
+                logger.info(f"Start processing document {doc_key} with len {len(doc['content'])}")            
                 chunks = {
                     compute_mdhash_id(dp["content"], prefix="chunk-"): {
                         **dp,
                         "full_doc_id": doc_key,
                     }
-                    for dp in chunking_by_token_size(
+                    for dp in self.recursive_chunking_langchain(
                         doc["content"],
-                        overlap_token_size=self.chunk_overlap_token_size,
-                        max_token_size=self.chunk_token_size,
-                        tiktoken_model=self.tiktoken_model_name,
+                        chunk_size=self.chunk_token_size,
+                        chunk_overlap=self.chunk_overlap_token_size,
+                        model_name=self.tiktoken_model_name,
                     )
                 }
                 inserting_chunks.update(chunks)
@@ -495,13 +510,14 @@ class HyperGraphRAG:
         return loop.run_until_complete(self.aquery(query, param))
 
     async def aquery(self, query: str, param: QueryParam = QueryParam()):
-        if param.mode in ["hybrid"]:
+        if param.mode in ["hybrid", "global","local"]:
             response = await kg_query(
                 query,
                 self.chunk_entity_relation_graph,
                 self.entities_vdb,
                 self.hyperedges_vdb,
                 self.text_chunks,
+                self.chunks_vdb,
                 param,
                 asdict(self),
                 hashing_kv=self.llm_response_cache,

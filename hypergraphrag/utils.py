@@ -543,3 +543,39 @@ def safe_unicode_decode(content):
     )
 
     return decoded_content
+
+def normalize_entity_name(entity_name: str) -> str:
+    """
+    Normalize entity name to avoid duplicates due to minor formatting differences.
+
+    Examples:
+        "WITHIN-GROUP VARIATION" -> "WITHIN GROUP VARIATION"
+        "MULTI  SPACE" -> "MULTI SPACE"
+        "ENTITY_NAME" -> "ENTITY NAME"
+    """
+    if not isinstance(entity_name, str):
+        return entity_name
+
+    # Replace hyphens, underscores, and other separators with spaces
+    normalized = re.sub(r'[-_/\\]', ' ', entity_name)
+
+    # Normalize multiple spaces to single space
+    normalized = re.sub(r'\s+', ' ', normalized)
+
+    # Strip leading/trailing whitespace
+    normalized = normalized.strip()
+
+    return normalized
+
+def min_max_normalize(x):
+    if len(x) == 0:
+        return np.array([])
+    min_val = np.min(x)
+    max_val = np.max(x)
+    range_val = max_val - min_val
+    
+    # Handle the case where all values are the same (range is zero)
+    if range_val == 0:
+        return np.ones_like(x)  # Return an array of ones with the same shape as x
+    
+    return (x - min_val) / range_val

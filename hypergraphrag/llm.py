@@ -26,6 +26,7 @@ from tenacity import (
     retry_if_exception_type,
 )
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from sentence_transformers import SentenceTransformer
 
 from .utils import (
     wrap_embedding_func_with_attrs,
@@ -57,7 +58,7 @@ async def openai_complete_if_cache(
     base_url=None,
     api_key=None,
     **kwargs,
-) -> str:
+) -> tuple[Union[str, AsyncIterator[str]], dict]:
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
 
@@ -85,6 +86,22 @@ async def openai_complete_if_cache(
         response = await openai_async_client.chat.completions.create(
             model=model, messages=messages, **kwargs
         )
+        
+    # Extract token usage metadata if available
+    metadata = {}
+    try:
+        usage = getattr(response, "usage", None)
+        if usage:
+            metadata["prompt_tokens"] = usage.prompt_tokens
+            metadata["completion_tokens"] = usage.completion_tokens
+            prompt_details = getattr(usage, "prompt_tokens_details", None)
+            if prompt_details and hasattr(prompt_details, "cached_tokens"):
+                    metadata["cached_tokens"] = prompt_details.cached_tokens
+            else:
+                metadata["cached_tokens"] = 0
+        metadata["finish_reason"] = response.choices[0].finish_reason
+    except Exception:
+        pass
 
     if hasattr(response, "__aiter__"):
 
@@ -96,13 +113,13 @@ async def openai_complete_if_cache(
                 if r"\u" in content:
                     content = safe_unicode_decode(content.encode("utf-8"))
                 yield content
-
-        return inner()
+    
+        return inner(), metadata
     else:
         content = response.choices[0].message.content
         if r"\u" in content:
             content = safe_unicode_decode(content.encode("utf-8"))
-        return content
+        return content, metadata
 
 
 @retry(
@@ -771,7 +788,7 @@ async def zhipu_embedding(
 async def openai_embedding(
     texts: list[str],
     model: str = "text-embedding-3-small",
-    base_url: str = None,
+    base_url: str = "https://vip.apiyi.com/v1",
     api_key: str = None,
 ) -> np.ndarray:
     if api_key:
@@ -1005,6 +1022,65 @@ async def hf_embedding(texts: list[str], tokenizer, embed_model) -> np.ndarray:
         return embeddings.detach().to(torch.float32).cpu().numpy()
     else:
         return embeddings.detach().cpu().numpy()
+
+@lru_cache(maxsize=2)
+def load_sentence_transformer(model_name: str):
+    model = SentenceTransformer(
+        model_name,
+        trust_remote_code=True,
+        device="cpu",
+        config_kwargs={"use_memory_efficient_attention": False, "unpad_inputs": False}
+)
+    return model
+    # return SentenceTransformer(model_name, trust_remote_code=True)
+
+@wrap_embedding_func_with_attrs(embedding_dim=1024, max_token_size=8192)
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=60),
+    retry=retry_if_exception_type((RateLimitError, APIConnectionError, Timeout)),
+)
+async def sentence_transformer_embedding(
+    texts: list[str],
+    model_name: str = "dunzhang/stella_en_400M_v5",
+    mode: str = "document",  # "document" or "query"
+    encode_kwargs: dict = None,
+) -> np.ndarray:
+    """
+    Compute embeddings using SentenceTransformer embeddings.
+    
+    Args:
+        texts: str or list of str texts to embed.
+        model_name: model repo or path (default: "dunzhang/stella_en_400M_v5").
+        mode: "query" to encode queries; "document" for passages; defaults to "document".
+        encode_kwargs: additional kwargs forwarded to encoding method.
+        
+    Returns:
+        np.ndarray: embeddings array.
+    """
+    if isinstance(texts, str):
+        texts = [texts]
+
+    model = load_sentence_transformer(model_name)
+   # Prefer GPU if available
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    try:
+        model.to(device)
+    except Exception:
+        pass
+
+    # defaults safe for memory
+    defaults = dict(batch_size=5, show_progress_bar=True, convert_to_numpy=True)
+    if encode_kwargs:
+        defaults.update(encode_kwargs)
+    # defaults safe for memory
+    defaults = dict(batch_size=5, show_progress_bar=True, convert_to_numpy=True)
+    if encode_kwargs:
+        defaults.update(encode_kwargs)
+            
+    embeddings = model.encode(texts, device=device, **defaults) # type: ignore
+
+    return embeddings
 
 
 async def ollama_embedding(texts: list[str], embed_model, **kwargs) -> np.ndarray:

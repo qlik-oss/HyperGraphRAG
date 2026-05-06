@@ -517,6 +517,7 @@ class HyperGraphRAG:
                 self.entities_vdb,
                 self.hyperedges_vdb,
                 self.text_chunks,
+                self.chunks_vdb,
                 param,
                 asdict(self),
                 hashing_kv=self.llm_response_cache,

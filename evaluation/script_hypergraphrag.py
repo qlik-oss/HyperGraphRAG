@@ -9,6 +9,8 @@ os.environ["OPENAI_API_KEY"] = open("openai_api_key.txt").read().strip()
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_source', default='hypertension')
+parser.add_argument('--ppr', action='store_true', help='Enable PPR ranking (graph-build time excluded from reported query time)')
+
 args = parser.parse_args()
 data_source = args.data_source
 
@@ -16,7 +18,7 @@ rag = HyperGraphRAG(working_dir=f"expr/{data_source}")
 
 async def query_with_semaphore(sem, q):
     async with sem:
-        return await rag.aquery(q, QueryParam(only_need_context=True))
+        return await rag.aquery(q, QueryParam(only_need_context=True, ppr_enabled=args.ppr))
 
 async def main():
     with open(f"datasets/{data_source}/questions.json") as f:
