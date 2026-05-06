@@ -1,7 +1,8 @@
-torch==2.3.0
+torch==2.8.0
 accelerate
 aioboto3
 aiohttp
+langchain-text-splitters
 
 # database packages
 graspologic
