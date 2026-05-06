@@ -55,10 +55,10 @@ async def openai_complete_if_cache(
     prompt,
     system_prompt=None,
     history_messages=[],
-    base_url="https://vip.apiyi.com/v1",
+    base_url=None,
     api_key=None,
     **kwargs,
-) -> str:
+) -> tuple[Union[str, AsyncIterator[str]], dict]:
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
 
@@ -86,6 +86,22 @@ async def openai_complete_if_cache(
         response = await openai_async_client.chat.completions.create(
             model=model, messages=messages, **kwargs
         )
+        
+    # Extract token usage metadata if available
+    metadata = {}
+    try:
+        usage = getattr(response, "usage", None)
+        if usage:
+            metadata["prompt_tokens"] = usage.prompt_tokens
+            metadata["completion_tokens"] = usage.completion_tokens
+            prompt_details = getattr(usage, "prompt_tokens_details", None)
+            if prompt_details and hasattr(prompt_details, "cached_tokens"):
+                    metadata["cached_tokens"] = prompt_details.cached_tokens
+            else:
+                metadata["cached_tokens"] = 0
+        metadata["finish_reason"] = response.choices[0].finish_reason
+    except Exception:
+        pass
 
     if hasattr(response, "__aiter__"):
 
@@ -97,13 +113,13 @@ async def openai_complete_if_cache(
                 if r"\u" in content:
                     content = safe_unicode_decode(content.encode("utf-8"))
                 yield content
-
-        return inner()
+    
+        return inner(), metadata
     else:
         content = response.choices[0].message.content
         if r"\u" in content:
             content = safe_unicode_decode(content.encode("utf-8"))
-        return content
+        return content, metadata
 
 
 @retry(
