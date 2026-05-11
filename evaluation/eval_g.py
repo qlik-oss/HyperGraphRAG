@@ -7,7 +7,7 @@ from functools import partial
 # 设置 OpenAI API 密钥
 os.environ["OPENAI_API_KEY"] = open("openai_api_key.txt").read().strip()
 # client = OpenAI()
-client = OpenAI(api_key=open("openai_api_key.txt").read().strip(), base_url="https://api.apiyi.com/v1")
+client = OpenAI(api_key=open("openai_api_key.txt").read().strip(), base_url=None)
 
 def cal_gen(question, answers, generation, f1_score):
     exp = {}

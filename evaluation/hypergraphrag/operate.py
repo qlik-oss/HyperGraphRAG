@@ -4,7 +4,7 @@ import logging
 import re
 import copy
 from tqdm.asyncio import tqdm as tqdm_async
-from typing import Union, Callable
+from typing import Union, Callable, cast
 from collections import Counter, defaultdict
 import warnings
 import igraph as ig
@@ -1050,7 +1050,6 @@ async def _get_edge_data(
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     query_param: QueryParam,
     entity_to_chunk_ids: dict[str, set[str]],
-    use_noisy_or: bool = True,    
 ):
     results = await hyperedges_vdb.query(keywords, top_k=query_param.top_k)
 
@@ -1250,9 +1249,11 @@ async def _find_related_text_unit_from_relationships(
         max_token_size=query_param.max_token_for_text_unit,
     )
 
-    all_text_units: list[TextChunkSchema] = [t["data"] for t in truncated_text_units]
+    result_text_units: list[TextChunkSchema] = [
+        cast(TextChunkSchema, t["data"]) for t in truncated_text_units
+    ]
 
-    return all_text_units
+    return result_text_units
 
 
 def combine_contexts(entities, relationships, sources):
