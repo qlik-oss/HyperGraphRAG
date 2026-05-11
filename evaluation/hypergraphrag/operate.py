@@ -1376,6 +1376,8 @@ async def _ppr_rank_text_units(
     """
     logging.info("Running PPR ranking for text units...")
     local_kg_inst = copy.deepcopy(knowledge_graph_inst)
+
+    # TODO: to be optimized: build the graph with chunks only once when the graph is constructed, instead of every time when PPR is called.
     local_kg_inst = await build_graph_with_chunks(local_kg_inst)
 
     entity_sims = getattr(query_param, "_entity_sims", {})
